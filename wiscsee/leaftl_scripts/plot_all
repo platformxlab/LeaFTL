@@ -1,0 +1,296 @@
+#!/usr/bin/python3
+
+
+from email.policy import default
+import glob
+from inspect import trace
+import re
+from collections import defaultdict, OrderedDict
+from scipy.stats import gmean
+import numpy as np
+import pandas as pd
+import os
+import sys
+import pathlib
+import json
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import math
+
+
+matplotlib.rcParams.update({'font.size': 10})
+matplotlib.rcParams.update({'font.family': 'serif'})
+matplotlib.rcParams['xtick.major.pad'] = '8'
+matplotlib.rcParams['ytick.major.pad'] = '8'
+
+colors = ['#ff796c', 'lightgray', '#95d0fc', 'white', '#96f97b']
+hatches = ['', "//", "\\\\", '', '-']
+
+def plot_latency(data, traces, ftls, filename, log=False):
+    fig, ax = plt.subplots(1, figsize=(5, 2))
+    for j, row in enumerate(data):
+        data[j] = row / max(row[0], 1)
+
+
+    X = np.arange(7)
+    width = 1/(len(ftls)+1)
+    for i in range(len(ftls)):
+        ax.bar(X + width*i, data[:, i], color = colors[i], width = width, label=ftls[i], edgecolor = 'black', hatch=hatches[i], zorder=3)
+    ax.set_xticks(X + width * 1.5)
+    ax.set_xticklabels(traces, ha = "center", rotation=0)
+    # ax.set_xlabel(xlabels[k])
+    ax.set_ylabel("Normalized Perf.")
+    ax.set_ylim([0,1.2])
+    ax.grid(axis = 'y', linestyle='--', zorder=0)
+
+    # lines_labels = [_ax.get_legend_handles_labels() for _ax in fig.axes][:1]
+    # lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+
+    legend = plt.legend(loc="upper center", prop={'size':7}, ncol = 4, borderaxespad=0.)
+    ax.set_xticklabels(traces, ha = "right", rotation=15)
+    # legend.set_rasterized(True)
+    legend.draw_frame(False)
+    plt.tight_layout()
+    plt.savefig(f"plots/{filename}.png", dpi=400)
+
+def plot_memory(data, traces, ftls, filename, log=False):
+    fig, ax = plt.subplots(1, figsize=(5, 2))
+
+    X = np.arange(len(traces))
+    # print(data, traces, ftls)
+    width = 1/(len(ftls)+1)
+    for i in range(0, len(ftls)):
+        ax.bar(X + width*i, data[:, i], color = colors[i], width = width, label=ftls[i], edgecolor = 'black', hatch=hatches[i], rasterized=False, zorder=3)
+
+    ymax = max(data[:, 0]) * 1.2
+    if ymax <= 2:
+        ytickgap = 0.2
+    else:
+        ytickgap = 4.0
+    ax.set_xticks(X + width * 1.5)
+    ax.set_xticklabels(traces, ha = "right", rotation=15)
+    ax.set_ylabel("Memory Footprint \nReduction")
+    legend = ax.legend(loc="upper center", prop={'size':7}, ncol = 5, borderaxespad=0.)
+    legend.draw_frame(False)
+    if log:
+        ax.set_yscale('log')
+        ax.set_ylim( (pow(10,-2),2*pow(10,0)) )
+        ax.set_yticks([1/50,1/20,1/10,1/5,1/2,1])
+        ax.set_yticklabels(reversed(["1x","2x","5x","10x","20x","50x"]))
+    else:
+        ax.set_ylim([0,ymax])
+        ax.set_yticks(np.arange(0, ymax, ytickgap))
+    ax.grid(axis = 'y', linestyle='--', zorder=0)
+
+
+    plt.tight_layout()
+    plt.savefig(f"plots/{filename}.png", dpi=400)
+    plt.clf()
+
+def plot_misprediction(data, traces, ftls, filename):
+    fig, ax = plt.subplots(1, figsize=(5, 2))
+
+    X = np.arange(len(traces))
+    width = 1/(len(ftls)+1)
+    for i in range(0, len(ftls)):
+        ax.bar(X + width*i, data[:, i], color = colors[i], width = width, label=ftls[i], edgecolor = 'black', hatch=hatches[i], rasterized=False, zorder=3)
+
+    ymax = 15
+    ax.set_xticks(X + width * 1.5)
+    ax.set_xticklabels(traces, ha = "right", rotation=15)
+    ax.set_ylabel("Misprediction (%)")
+    legend = ax.legend(loc="upper center", prop={'size':7}, ncol = 5, borderaxespad=0.)
+    legend.draw_frame(False)
+    ax.set_ylim([0,ymax])
+    ax.grid(axis = 'y', linestyle='--', zorder=0)
+
+    plt.tight_layout()
+    plt.savefig(f"plots/{filename}.png", dpi=400)
+    plt.clf()
+
+def plot_cdf(data, filename):
+    linestyles = ['-','dotted','--','-.']
+        
+    matplotlib.rcParams.update({'font.size': 10})
+    matplotlib.rcParams.update({'font.family': 'serif'})
+    matplotlib.rcParams['xtick.major.pad'] = '8'
+    matplotlib.rcParams['ytick.major.pad'] = '8'
+    fig, ax = plt.subplots(1,1,figsize=(5, 3))
+    #
+    ax.set_yscale('log')
+    ax.invert_yaxis()
+    for i, (k,v) in enumerate(data.items()):
+        v = OrderedDict(sorted(v.items()))
+        bins = np.array(list(v.keys()))# * avg_lookup_latency
+        dist = np.array(list(v.values()))
+        cdf = np.cumsum(dist) / np.sum(dist)
+        ax.plot(bins, 1-cdf, linestyle= linestyles[i % len(linestyles)], label=k, linewidth=2, zorder=3)
+
+    ax.set_xlabel("Number of Levels",fontsize=9)
+    ax.set_ylabel("Percentage of\nLookups",fontsize=9)
+    ax.grid(linestyle='--')
+    ax.invert_yaxis()
+    ax.set_ylim([0.0001, 1])
+    ax.set_xlim([1, 35])
+    ax.set_xticks([1]+list(ax.get_xticks())[1:])
+    ax.set_xticklabels(np.array([1]+list(ax.get_xticks())[1:],dtype=int),fontsize=8)
+    ax.set_yticks([1.e-04, 1.e-03, 1.e-02, 1.e-01, 1.e+00])
+    ax.set_yticklabels(reversed(["0%", "90%", "99%", "99.9%", "99.99%"]),fontsize=8)
+    ax.tick_params(axis='both', which='major', pad=2)
+    
+    fig.subplots_adjust(top=0.2)
+    legend0 = ax.legend(ncol=1, fontsize=6, prop={'size': 6},loc = 'center right',bbox_to_anchor=(1.32, 0.4),framealpha=1)
+    legend0.draw_frame(True)
+    legend0.set_in_layout(False)
+
+    plt.tight_layout()
+    plt.savefig(f"plots/{filename}.png", dpi=400)
+    plt.clf()
+
+def abbreviate(file_name):
+    dictionary = {"MSR-hm": ["hm_0"], "MSR-usr": ["usr_0"], "MSR-prxy": ["prxy_0"], "MSR-src2_2": ["src2_2"], "MSR-prn": ["prn_0"], "FIU-home": ["FIU", "homes"], "FIU-mail": ["FIU", "mail"], "MSR-rsrch": ["rsrch_0"], "MSR-proj": ["proj_0"], "MSR-src2": ["src2_0"], "MSR-ts": ["ts_0"], "MSR-wdev": ["wdev_0"], "tpcc":["tpcc"], "auctionmark":["auctionmark"], "seats":["seats"], "oltp":["oltp"], "compflow":["compflow"]}
+
+    for short, keywords in dictionary.items():
+        match = True
+        for key in keywords:
+            if key not in file_name:
+                match = False
+                break
+        if match:
+            return short
+           
+def geo_mean(iterable):
+    a = np.array(iterable)
+    return a.prod()**(1.0/len(a))
+
+if __name__ == "__main__":
+    batch_name = sys.argv[1]
+    BASE_PATH = os.path.dirname(os.path.realpath(__file__))
+    PLOT_DIR = f"{BASE_PATH}/plots/"
+    os.makedirs(PLOT_DIR, exist_ok=True)
+    raw_data_dir = f'{BASE_PATH}/raw_results/{batch_name}'
+
+    if type(raw_data_dir) == list:
+        files = []
+        for dir in raw_data_dir:
+            files += glob.glob(dir+"/*.txt")
+    else:
+        files = glob.glob(raw_data_dir+"/*.txt")
+    latencies = defaultdict(dict)
+    memory = defaultdict(dict)
+    dftl_memory = defaultdict(dict)
+    segments = defaultdict(dict)
+    consecutive_segments = defaultdict(dict)
+    mispredictions = defaultdict(dict)
+    requests = defaultdict(dict)
+    mispredictions = defaultdict(dict)
+    lookup_dists = dict()
+    
+ 
+    categories = set()
+
+    for file in files:
+        exp_id = int(os.path.basename(file).split("_")[0])
+        recorder_output_file = f"{raw_data_dir}/{exp_id}/recorder.json"
+        with open(file, "r") as f, open(recorder_output_file, "r") as recorder_f:
+            segment, consecutive, latency, trace_file, memory_size, dftl_memory_size, ratio, request, ftl = None, None, None, None, None, None, None, None, None
+            recorder_output = json.load(recorder_f)
+            lookup_dist = {int(k):v for k, v in recorder_output["distribution of lookups"][0].items()}
+            for i, line in enumerate(f):
+                line = line.strip()
+                if i == 0:
+                    cmd = line.split(" ")
+                    try:
+                        gamma = int(float(cmd[cmd.index("-g")+1]))
+                    except ValueError:
+                        gamma = 0
+                    cache_size = int(float(cmd[cmd.index("-c")+1]))
+                    ftl = cmd[cmd.index("-f")+1]
+                    trace_file = abbreviate(cmd[cmd.index("-t")+1])
+                if "estimated learnedftl memory footprint:" in line:
+                    memory_size = int(re.search("([0-9]+) B$", line).group(1))
+                if "estimated dftl memory footprint:" in line:
+                    dftl_memory_size = int(re.search("([0-9]+) B$", line).group(1))
+                if "End-to-end overall response time per page:" in line:
+                    latency = float(re.search("([0-9]+.[0-9]+)us", line).group(1))
+                    request = float(re.search("Num of requests ([0-9]+)", line).group(1))
+                if "# of segments:" in line:
+                    segment = float(re.search(": ([0-9]+)", line).group(1))
+                if "# of consecutive segments:" in line:
+                    consecutive = float(re.search(": ([0-9]+)", line).group(1))
+                if "defaultdict(<type 'int'>" in line:
+                    misprediction = eval(re.search("({.*?})", line).group(1))
+                    if 2 in misprediction:
+                        ratio = misprediction[2] / (misprediction[1] + misprediction[2])
+                    else:
+                        ratio = 0.0
+                    ratio = round(ratio, 4) * 100
+    
+            if ftl != "learnedftl":
+                category = ftl
+            else: 
+                category = f"{ftl}-{gamma}" 
+            categories.add(category)
+
+            if memory_size:
+                memory[trace_file][category] = memory_size
+                dftl_memory[trace_file][category] = dftl_memory_size
+            if latency:
+                latencies[trace_file][category] = latency
+            if request:
+                requests[trace_file][category] = request
+            if segment:
+                segments[trace_file][category] = segment
+            if consecutive:
+                consecutive_segments[trace_file][category] = consecutive
+            if ratio != None:
+                mispredictions[trace_file][category] = ratio
+            if category == "learnedftl-0" and lookup_dist:
+                lookup_dists[trace_file] = lookup_dist
+
+    if "memory_batch" in batch_name:
+        memory_df = pd.DataFrame(memory)
+        memory_df = memory_df.reindex(['dftldes', 'sftl', 'learnedftl-0'])
+        memory_df = memory_df.sort_index(axis=1)
+        memory_arr = np.transpose(memory_df.to_numpy(dtype=float))
+        for i in range(memory_arr.shape[0]):
+            memory_arr[i, :] = memory_arr[i, :] / memory_arr[i, 0]
+        
+        plot_memory(memory_arr, memory_df.columns, ['DFTL', 'SFTL', 'LeaFTL'], "memory", log=True)
+            
+    if "main_batch" in batch_name:
+        latency_df = pd.DataFrame(latencies)
+        latency_df = latency_df.reindex(['dftldes', 'sftl', 'learnedftl-0'])
+        latency_df = latency_df.sort_index(axis=1)
+        latency_arr = np.transpose(latency_df.to_numpy(dtype=float))
+        for i in range(latency_arr.shape[0]):
+            latency_arr[i, :] = latency_arr[i, :] / latency_arr[i, 0]
+        plot_latency(latency_arr, latency_df.columns, ['DFTL', 'SFTL', 'LeaFTL'], "latency", log=True)
+        plot_cdf(lookup_dists, "lookup_cdf")
+        
+    if "sensitivity" in batch_name:
+        memory_df = pd.DataFrame(memory)
+        memory_df = memory_df.reindex(['learnedftl-0', 'learnedftl-1', 'learnedftl-4','learnedftl-16'])
+        memory_df = memory_df.sort_index(axis=1)
+        memory_arr = np.transpose(memory_df.to_numpy(dtype=float))
+        for i in range(memory_arr.shape[0]):
+            memory_arr[i, :] = memory_arr[i, :] / memory_arr[i, 0]
+        plot_memory(memory_arr, memory_df.columns, ['$\gamma$=0', '$\gamma$=1', '$\gamma$=4','$\gamma$=16'], "memory_sensitivity", log=False)
+        
+        latency_df = pd.DataFrame(latencies)
+        latency_df = latency_df.reindex(['learnedftl-0', 'learnedftl-1', 'learnedftl-4','learnedftl-16'])
+        latency_df = latency_df.sort_index(axis=1)
+        latency_arr = np.transpose(latency_df.to_numpy(dtype=float))
+        for i in range(latency_arr.shape[0]):
+            latency_arr[i, :] = latency_arr[i, :] / latency_arr[i, 0]
+        plot_latency(latency_arr, latency_df.columns, ['$\gamma$=0', '$\gamma$=1', '$\gamma$=4','$\gamma$=16'], "latency_sensitivity", log=True)
+        
+        misprediction_df = pd.DataFrame(mispredictions)
+        misprediction_df = misprediction_df.reindex(['learnedftl-0', 'learnedftl-1', 'learnedftl-4','learnedftl-16'])
+        misprediction_df = misprediction_df.sort_index(axis=1)
+        misprediction_arr = np.transpose(misprediction_df.to_numpy(dtype=float))
+
+        plot_misprediction(misprediction_arr, misprediction_df.columns, ['$\gamma$=0', '$\gamma$=1', '$\gamma$=4','$\gamma$=16'], "misprediction")

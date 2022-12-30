@@ -1,0 +1,142 @@
+#!/usr/bin/python2
+import unittest
+import collections
+import shutil
+import os
+#import matplotlib
+import argparse
+
+from scipy import percentile
+#matplotlib.use('Agg')
+#import matplotlib.pyplot as plt
+#import statsmodels.distributions
+
+import config
+from workflow import *
+import wiscsim
+from utilities import utils
+from wiscsim.hostevent import Event, ControlEvent
+from config_helper import rule_parameter
+from pyreuse.helpers import shcmd
+from config_helper import experiment
+from wiscsim.learnedftl import *
+from wiscsim.utils import *
+from wiscsim.workload_parser import parse_events, create_config, mix_events
+import math
+
+KB = 1024
+MB = 1024**2
+GB = 1024**3
+
+def split_lpns(offset, size, page_size):
+    page_size = float(page_size)
+    lpns = [lpn for lpn in range(int(math.floor(offset/page_size)), int(math.ceil((offset+size)/page_size)))]
+
+    return lpns
+
+def create_config(ftl_type="dftldes"):
+    if ftl_type == "dftldes" or ftl_type == "learnedftl" or ftl_type == "sftl":
+        conf = wiscsim.dftldes.Config()
+        conf['ftl_type'] = "learnedftl"
+        conf['internal_ftl_type'] = ftl_type
+    else:
+        raise NotImplementedError
+
+    # ssd config
+    conf['flash_config']['n_pages_per_block'] = 256
+    conf['flash_config']['n_blocks_per_plane'] = 2048
+    conf['flash_config']['n_planes_per_chip'] = 64
+    conf['flash_config']['n_chips_per_package'] = 1
+    conf['flash_config']['n_packages_per_channel'] = 1
+    conf['flash_config']['n_channels_per_dev'] = 8
+
+    # set ftl
+    conf['do_not_check_gc_setting'] = True
+    conf.GC_high_threshold_ratio = 0.96
+    conf.GC_low_threshold_ratio = 0.5
+
+    conf['enable_simulation'] = True
+
+    utils.set_exp_metadata(conf, save_data = False,
+            expname = 'run_expname',
+            subexpname = 'run_subexpname')
+
+    conf['simulator_class'] = 'SimulatorDESNew'
+
+    utils.runtime_update(conf)
+
+    return conf
+
+
+class RunFTL():
+    def __init__(self, ftl, trace, start_lineno, lineno, output, write_only, ncq_depth, page_size, *args, **xargs):
+        assert(ftl in ["learnedftl", "hybridftl", "dftldes", "sftl"])
+        self.trace = trace
+        self.start_lineno = start_lineno
+        self.lineno = lineno
+        self.write_only = bool(int(write_only))
+
+        self.conf = create_config(ftl)
+        self.conf['SSDFramework']['ncq_depth'] = ncq_depth
+        self.conf['flash_config']['page_size'] = page_size
+
+        self.func = "self.run_%s()" % "learnedftl"
+        
+        if output:
+            recorder = True
+            xargs['result_dir'] = output
+        else:
+            recorder = False
+
+        self.events = parse_events(self.trace, self.conf.page_size, recorder=recorder, start_lineno = start_lineno, lineno=self.lineno, write_only=self.write_only)
+
+        self.conf.update(xargs)
+
+    def run(self):
+        eval(self.func)
+    
+    def statistics():
+        pass
+
+    def run_learnedftl(self):
+        log_msg("ftl = %s, gamma = %.4f, cache_size = %.2f MB, lineno = %d" % (self.conf['internal_ftl_type'], self.conf['gamma'], self.conf['cache_size'] / MB, self.lineno))
+        wf = Workflow(self.conf)
+        sim = wf.run_simulator(self.events)
+        mapping_table = sim.ssd.ftl.metadata.mapping_table
+        reference_mapping_table = sim.ssd.ftl.metadata.reference_mapping_table
+        # print(mapping_table.runs[-5:])
+        # print(mapping_table.lookup_range(797846, 797887))
+        # mapping_table.compact(promote=True)
+
+
+        log_msg(sim.ssd.ftl.hist)
+        log_msg("max # of levels: %d" % mapping_table.levels)
+        dist = mapping_table.dist_levels
+        if len(dist) > 0:
+            avg, std, percentile = np.average(dist), np.std(dist), np.percentile(dist, 99)
+            log_msg("average # of levels: %.2f, variation: %.2f, 99: %.2f" % (avg, std, percentile))
+        log_msg("# of segments: %d" % len(mapping_table.segments))
+        log_msg("# of consecutive segments: %d" % len(list(filter(lambda seg : seg.consecutive, mapping_table.segments))))
+        log_msg("estimated learnedftl memory footprint: %d B" % mapping_table.memory)
+        log_msg("estimated dftl memory footprint: %d B" % (len(reference_mapping_table.mapping_table)*8))
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-f', '--ftl', dest="ftl", required=True, help="FTL to run")
+    parser.add_argument('-t', '--trace', dest="trace", help="Trace path")
+    parser.add_argument('-l', '--lineno', dest="lineno", default=10**9, help="Line number", type=int)
+    parser.add_argument('-sl', '--start-line', dest="start_lineno", default=0, help="Start line number", type=int)
+    parser.add_argument('-c', '--cache', dest="cache_size", default=0, help="Cache Size in MB", type=float)
+    parser.add_argument('-mc', '--mapping-cache', dest="mapping_cache_bytes", default=10, help="Mapping table cache size in MB", type=float)
+    parser.add_argument('-g', '--gamma', dest="gamma", default=1e-4, help="Error bound of learnedftl", type=float)
+    parser.add_argument('-d', '--dry', dest="dry_run", action='store_true', default=False, help="Perform dry-run")
+    parser.add_argument('-o', '--output', dest="output", default='', help="Output directory")
+    parser.add_argument('-wo', '--write-only', dest="write_only", default=0, help="Write events only")
+    parser.add_argument('-q', '--ncq-depth', dest="ncq_depth", default=1, help="NCQ Depth", type=int)
+    parser.add_argument('-p', '--page-size', dest="page_size", default=4096, help="Page size", type=int)
+    args = parser.parse_args()
+
+    experiment = RunFTL(args.ftl, args.trace, args.start_lineno, args.lineno, args.output, args.write_only, args.ncq_depth, args.page_size, gamma=args.gamma, cache_size=int(args.cache_size*MB), dry_run=args.dry_run, mapping_cache_bytes=int(args.mapping_cache_bytes*MB))
+    experiment.run()
+    
+

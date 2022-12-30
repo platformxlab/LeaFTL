@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+import subprocess
+import itertools
+import os
+import time
+import datetime as dt
+import sys
+import shutil
+import copy
+import psutil
+from collections import defaultdict
+import json
+
+BASE_PATH = os.path.dirname(os.path.realpath(__file__))
+TRACE_PATH = f"{BASE_PATH}/leaftl_traces"
+OUTPUT_PATH = f"{BASE_PATH}/raw_results"
+WARMUP_FILE = f"{OUTPUT_PATH}/warmup/warmup.json"
+
+DEBUG = True
+STDOUT = False
+
+KB = 1024.0
+MB = 1024.0**2
+GB = 1024.0**3
+
+WARMUP_RATIO = 0.9
+BITMAP_SIZE = 67
+DRAM_SIZE = 1024  # MB
+BUFFER_SIZE = 8   # MB
+
+def log_msg(*msg):
+    '''
+    Log a message with the current time stamp.
+    '''
+    if DEBUG:
+        print("[%s] " % (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")), *msg)
+
+
+class BatchArg:
+    keys = ['ftl', 'start_lineno', 'lineno', 'gamma', 'trace', 'cache', 'mapping_cache', 'write_only', 'ncq_depth', 'page_size']
+    options = ['f', 'sl', 'l', 'g', 't', 'c', 'mc', 'wo', 'q', 'p']
+    op_mapping = dict(zip(keys, options))
+
+    def __init__(self, batchArg, identifier, output_dir):
+        self.batchArg = self.expand(batchArg)
+        self.batchArg['trace'] = os.path.join(TRACE_PATH, self.batchArg['trace'])
+        
+        parent_out_dir = output_dir
+        self.output_dir = os.path.join(output_dir, str(identifier))
+        if not os.path.exists(self.output_dir):
+            os.mkdir(self.output_dir)
+        self.output_path = os.path.join(parent_out_dir, "%d_stdout.txt" % identifier)
+        with open(self.output_path, 'w') as outfile:
+            outfile.write(self.cmd()+"\n")
+
+    def __str__(self):
+        return str(self.batchArg)
+
+    def __repr__(self):
+        return str(self.batchArg)
+
+    def expand(self, batchArg):
+        expandedArg = dict()
+        for k, v in batchArg.items():
+            if isinstance(k, tuple) and len(k) >= 2:
+                for i in range(len(k)):
+                    expandedArg[k[i]] = v[i]
+            else:
+                expandedArg[k] = v
+        return expandedArg
+
+
+    def cmd(self):
+        ret =  " ".join(["-%s %s" % (BatchArg.op_mapping[k], v) for k, v in self.batchArg.items() if v != None])
+        if not STDOUT:
+            ret = f"pypy run_ftl {ret} -o {self.output_dir} >> {self.output_path}"
+        else:
+            ret = f"pypy run_ftl {ret} -o {self.output_dir}"
+        return ret
+
+class BatchArgGenerator:
+    #arg_filter = {'learnedftl' : ['mapping_cache'], 'dftldes' : ['gamma']}
+    arg_filter = {'learnedftl' : [], 'dftldes' : ['gamma'], 'sftl': ['gamma']}
+    def __init__(self, name):
+        self.batchArgs = []
+        self.num_batches = 0
+        self.runned_batches = 0
+        self.name = name
+        self.output = f"{OUTPUT_PATH}/{name}/"
+        if not os.path.exists(self.output):
+            #shutil.rmtree(self.output)
+            os.mkdir(self.output)
+        
+        log_msg("Output Directory", self.output)
+
+    def pop_n(self, n):
+        batches =  self.batchArgs[self.runned_batches:self.runned_batches+n]
+        self.runned_batches += n
+        return batches
+
+    def __str__(self):
+        return "\n".join([str(v) for v in self.batchArgs])
+
+    def cmd_list(self):
+        return "\n".join([v.cmd() for v in self.batchArgs])
+    
+    def update(self, batch):
+        batchargs = self.combination(batch)
+        self.batchArgs += [BatchArg(dict(zip(batch.keys(), arg)), self.num_batches+i, self.output) for i, arg in enumerate(batchargs)]
+        self.num_batches += len(batchargs)
+
+    def combination(self, batch):
+        batches = []
+        batchargs = []
+
+        if 'ftl' in batch:
+            for ftl in batch['ftl']:
+                ftl_batch = copy.deepcopy(batch)
+                for arg in BatchArgGenerator.arg_filter[ftl]:
+                    ftl_batch[arg] = [None]
+                ftl_batch['ftl'] = [ftl]
+                batches.append(ftl_batch)  
+
+        else:
+            batches = [batch]
+
+        for batch in batches:
+            assert([isinstance(v, list) for v in batch.values()])
+            batchargs += list(itertools.product(*batch.values()))
+
+
+        return batchargs
+
+
+
+def memory_batch(generator, warmup):
+    batch = defaultdict(list)
+    batch['start_lineno'] = [0]
+    batch['lineno'] = [1000000000]
+    batch['trace'] = ["MSR-Cambridge/usr_0.csv", "MSR-Cambridge/prn_0.csv", "MSR-Cambridge/src2_0.csv", "MSR-Cambridge/hm_0.csv", "MSR-Cambridge/prxy_0.csv", 'FIU/homes/homes-110108-112108.1.blkparse', 'FIU/mail/cheetah.cs.fiu.edu-110108-113008.1.blkparse']
+    batch['cache'] = [BUFFER_SIZE]
+    batch['ftl'] = ['dftldes', 'sftl', 'learnedftl']
+
+    batch['write_only'] = [0]
+    batch['ncq_depth'] = [1]
+    batch['page_size'] = [4096]
+
+    generator.update(batch)
+    
+def main_batch(generator, warmup):
+    batch = defaultdict(list)
+    batch['start_lineno'] = [0]
+    batch['lineno'] = [1000000000]
+    batch['trace'] = ["MSR-Cambridge/usr_0.csv", "MSR-Cambridge/prn_0.csv", "MSR-Cambridge/src2_0.csv", "MSR-Cambridge/hm_0.csv", "MSR-Cambridge/prxy_0.csv", 'FIU/homes/homes-110108-112108.1.blkparse', 'FIU/mail/cheetah.cs.fiu.edu-110108-113008.1.blkparse']
+    
+    sftl_cache_size = DRAM_SIZE - warmup["sftl"]*WARMUP_RATIO // MB - BITMAP_SIZE
+    leaftl_cache_size = DRAM_SIZE - warmup["learnedftl-0"]*WARMUP_RATIO // MB - BITMAP_SIZE
+    batch[('ftl', 'gamma', 'cache', 'mapping_cache')] = [("dftldes", 1e-4, BUFFER_SIZE, DRAM_SIZE-BUFFER_SIZE), ("sftl", 1e-4, sftl_cache_size, DRAM_SIZE-sftl_cache_size),("learnedftl", 1e-4, leaftl_cache_size, DRAM_SIZE-leaftl_cache_size)] 
+
+    batch['write_only'] = [0]
+    batch['ncq_depth'] = [1]
+    batch['page_size'] = [4096]
+
+    generator.update(batch)
+    
+def sensitivity_batch(generator, warmup):
+    batch = defaultdict(list)
+    batch['start_lineno'] = [0]
+    batch['lineno'] = [1000000000]
+    batch['trace'] = ["MSR-Cambridge/usr_0.csv", "MSR-Cambridge/prn_0.csv", "MSR-Cambridge/src2_0.csv", "MSR-Cambridge/hm_0.csv", "MSR-Cambridge/prxy_0.csv", 'FIU/homes/homes-110108-112108.1.blkparse', 'FIU/mail/cheetah.cs.fiu.edu-110108-113008.1.blkparse']
+
+    leaftl_cache_sizes = [DRAM_SIZE - warmup[f"learnedftl-{gamma}"]*WARMUP_RATIO // MB - BITMAP_SIZE for gamma in [0, 1, 4, 16]]
+        
+    batch[('ftl', 'gamma', 'cache', 'mapping_cache')] = [("learnedftl", 1e-4, leaftl_cache_sizes[0], DRAM_SIZE-leaftl_cache_sizes[0]), ("learnedftl", 1, leaftl_cache_sizes[1], DRAM_SIZE-leaftl_cache_sizes[1]), ("learnedftl", 4, leaftl_cache_sizes[2], DRAM_SIZE-leaftl_cache_sizes[2]), ("learnedftl", 16, leaftl_cache_sizes[3], DRAM_SIZE-leaftl_cache_sizes[3]),] 
+
+    batch['write_only'] = [0]
+    batch['ncq_depth'] = [1]
+    batch['page_size'] = [4096]
+
+    generator.update(batch)
+
+
+if __name__ == "__main__":
+    PARALLELISM = 21
+    assert(sys.argv[1] and "Please specify a name for this batch")
+    name = sys.argv[1]
+    if len(sys.argv) > 2:
+        # STDOUT = bool(int(sys.argv[2]))
+        PARALLELISM = int(sys.argv[2])
+        
+    generator = BatchArgGenerator(name)
+    warmup = dict()
+    if os.path.exists(WARMUP_FILE):
+        with open(WARMUP_FILE) as in_f:
+            warmup = json.load(in_f)
+            
+    if "main_batch" in name:
+        main_batch(generator, warmup)
+    elif "sensitivity_batch" in name:
+        sensitivity_batch(generator, warmup)
+    elif "memory_batch" in name:
+        memory_batch(generator, warmup)
+    else:
+        raise NotImplementedError
+
+    procs = dict()
+    unfinished_batch = generator.batchArgs
+    log_msg(f"Total {len(unfinished_batch)} jobs")
+
+    # TODO: constantly bringing batches into the system
+    while len(unfinished_batch) > 0 or len(procs) > 0:
+        
+        exit_codes = {proc:proc.poll() for proc in procs}
+        finished_procs = [proc for proc, ec in exit_codes.items() if ec is not None ]
+        if len(finished_procs) > 0:
+            for finished in finished_procs:
+                log_msg(f"Finished job {finished.pid}")
+                finished.wait()
+                del procs[finished]
+        else:
+            time.sleep(1)
+        
+        # if OOM, kill a new process
+        while psutil.virtual_memory().percent >= 90.0:
+            print(f"Memory Usage: {psutil.virtual_memory().percent}%")
+            # mem, proc = max([(psutil.Process(proc.pid).memory_info().rss, proc) for proc in procs], key=lambda x: x[0])
+            create_time, proc = max([(psutil.Process(proc.pid).create_time(), proc) for proc in procs], key=lambda x: x[0])
+            mem = psutil.Process(proc.pid).memory_info().rss
+            unfinished_batch.append(procs[proc])
+            log_msg(f"Killing job {proc.pid} due to OOM and release {mem / 1024} MB memory")
+            log_msg(f"# of Unfinished jobs {len(unfinished_batch)}")
+            subprocess.call("kill -9 %d" % proc.pid, shell=True)
+            time.sleep(5)
+            del procs[proc]
+
+        while len(procs) < PARALLELISM and len(unfinished_batch) > 0 and psutil.virtual_memory().percent <= 75.0:
+            next_batch = [unfinished_batch.pop(0)]
+
+            for batchArg in next_batch:
+                proc = subprocess.Popen(batchArg.cmd(), cwd=BASE_PATH, shell=True)
+                procs[proc] = batchArg
+                log_msg(f"Running job {proc.pid}: {batchArg}")
+                log_msg(f"{batchArg.cmd()}")
+        
+        if len(unfinished_batch) > 0:
+            # if psutil.virtual_memory().percent >= 50.0:
+            #     log_msg(f"Waiting for enough memory to be scheduled")
+                
+            # if len(procs) >= PARALLELISM:
+            #     log_msg(f"Maximum parallel tasks")
+        
+            time.sleep(30)
+
+    
